@@ -1,350 +1,202 @@
-"""
-SignDesk - src/train.py
-======================
-Skrip pelatihan model machine learning untuk klasifikasi alfabet BISINDO.
+"""Latih model pengenal huruf BISINDO dari semua CSV di data/landmarks/.
 
-ALUR KERJA:
-1. Menggabungkan semua file CSV di folder data/landmarks/
-   (baik dari dataset gambar maupun rekaman webcam).
-2. Membersihkan data (memvalidasi 127 fitur, membuang baris rusak/NaN).
-3. Pemisahan Data (Split):
-   - Jika tersedia person_id unik (bukan 'unknown'): menggunakan GroupShuffleSplit
-     agar penutur pada data uji TIDAK PERNAH muncul pada data latih (speaker-independent).
-   - Jika semua data 'unknown': menggunakan stratified train_test_split dengan
-     peringatan keras potensi over-optimistic / leak.
-4. Melatih 2 Model:
-   - Model A: RandomForestClassifier (cepat, stabil, tahan noise).
-   - Model B: MLPClassifier (jaringan saraf tiruan multi-layer perceptron).
-5. Membandingkan performa latih vs uji (mendeteksi tanda-tanda overfitting).
-6. Menyimpan model terbaik & metadata label ke folder models/.
+Langkah:
+  1. Gabungkan semua CSV dan bersihkan baris rusak.
+  2. Split latih/uji BERDASARKAN person_id (orang/dataset yang diuji tidak ada di data latih).
+  3. Latih RandomForest (baseline) dan MLP, bandingkan akurasi uji.
+  4. Simpan model terbaik + daftar huruf + info split ke models/.
 
-CARA MENJALANKAN:
-  python src/train.py
+Jalankan dari folder utama:  python src/train.py
 """
 
 import sys
-import os
-import glob
-import tempfile
-import time
+from pathlib import Path
 
-# Hindari peringatan direktori cache matplotlib yang tidak writable di Windows
-os.environ.setdefault("MPLCONFIGDIR", tempfile.gettempdir())
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
+import joblib
 import numpy as np
 import pandas as pd
-import joblib
-
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.neural_network import MLPClassifier
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
-from sklearn.metrics import accuracy_score, f1_score
-
-# Tambahkan root proyek ke sys.path
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT_DIR)
+from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 import config
-from src.features import nama_kolom_fitur
+import features
 
 
-def muat_dan_gabungkan_data() -> pd.DataFrame:
-    """
-    Mencari dan menggabungkan seluruh file CSV di folder data/landmarks/.
-    """
-    pola_csv = os.path.join(config.LANDMARKS_DIR, "*.csv")
-    daftar_file = glob.glob(pola_csv)
+def muat_data():
+    """Gabungkan semua CSV landmark dan buang baris rusak. Kembalikan DataFrame."""
+    file_csv = sorted(config.LANDMARKS_DIR.glob("*.csv"))
+    if not file_csv:
+        print(f"Folder data kosong: {config.LANDMARKS_DIR}")
+        print("Jalankan dulu extract_from_images.py (T2) dan/atau collect_data.py (T3).")
+        return None
 
-    # Kecualikan file gabungan lama jika ada agar tidak terduplikasi
-    daftar_file = [
-        f for f in daftar_file
-        if os.path.basename(f) != os.path.basename(config.LANDMARKS_CSV)
-    ]
-
-    if not daftar_file:
-        print(f"❌ Tidak ditemukan file CSV data landmark di '{config.LANDMARKS_DIR}'.")
-        print("   Jalankan salah satu skrip ekstraksi data terlebih dahulu:")
-        print("   - python src/extract_from_images.py  (dari dataset citra)")
-        print("   - python src/collect_data.py         (dari webcam)")
-        sys.exit(1)
-
-    print(f"📂 Ditemukan {len(daftar_file)} file CSV data:")
-    list_df = []
-    for f in daftar_file:
+    kolom_fitur = features.nama_kolom_fitur()
+    kolom_standar = ["label", "person_id", "source"] + kolom_fitur
+    bagian = []
+    for file in file_csv:
         try:
-            df_part = pd.read_csv(f)
-            print(f"   - {os.path.basename(f)}: {len(df_part)} baris")
-            list_df.append(df_part)
-        except Exception as e:
-            print(f"   ⚠️ Gagal membaca {os.path.basename(f)}: {e}")
+            df = pd.read_csv(file)
+            # Jika header memakai format lama (f_000..f_126), sesuaikan otomatis
+            if "f_000" in df.columns and len(df.columns) == len(kolom_standar):
+                df.columns = kolom_standar
+            bagian.append(df)
+            print(f"Dibaca: {file.name} ({len(df)} baris)")
+        except Exception as error:
+            print(f"PERINGATAN: {file.name} dilewati, gagal dibaca: {error}")
+    if not bagian:
+        return None
 
-    if not list_df:
-        print("❌ Seluruh file CSV kosong atau tidak bisa dibaca.")
-        sys.exit(1)
-
-    df_gabungan = pd.concat(list_df, ignore_index=True)
-    return df_gabungan
-
-
-def bersihkan_data(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
-    """
-    Membersihkan data:
-    - Menghapus baris yang memiliki nilai NaN/kosong
-    - Memastikan label huruf kapital
-    - Memastikan jumlah kolom fitur persis 127 angka (f_000 s.d. f_126)
-    """
-    baris_awal = len(df)
-    kolom_fitur = nama_kolom_fitur()
-
-    # Periksa ketersediaan kolom wajib
+    tabel = pd.concat(bagian, ignore_index=True)
     kolom_wajib = ["label", "person_id"] + kolom_fitur
-    kolom_hilang = [k for k in kolom_wajib if k not in df.columns]
-    if kolom_hilang:
-        print(f"❌ Format CSV tidak lengkap! Kolom berikut hilang: {kolom_hilang[:5]}...")
-        sys.exit(1)
+    hilang = [k for k in kolom_wajib if k not in tabel.columns]
+    if hilang:
+        print(f"CSV tidak punya kolom wajib (contoh: {hilang[:3]}). Ekstrak ulang datanya.")
+        return None
 
-    # Buang baris dengan nilai kosong (NaN / None)
-    df_bersih = df.dropna(subset=kolom_wajib).copy()
+    awal = len(tabel)
+    tabel = tabel.replace([np.inf, -np.inf], np.nan)
+    tabel = tabel.dropna(subset=kolom_wajib)
+    tabel = tabel[tabel["label"].isin(config.HURUF)].reset_index(drop=True)
+    tabel["person_id"] = tabel["person_id"].astype(str)
+    if len(tabel) < awal:
+        print(f"Dibuang {awal - len(tabel)} baris rusak/label tidak valid.")
 
-    # Pastikan label huruf kapital dan string rapi
-    df_bersih["label"] = df_bersih["label"].astype(str).str.strip().str.upper()
-    df_bersih["person_id"] = df_bersih["person_id"].astype(str).str.strip()
-
-    # Buang label yang bukan huruf tunggal alfabet A-Z
-    df_bersih = df_bersih[df_bersih["label"].isin(config.HURUF_DIDUKUNG)].copy()
-
-    baris_terbuang = baris_awal - len(df_bersih)
-    if baris_terbuang > 0:
-        print(f"🧹 Membersihkan data: {baris_terbuang} baris rusak/tidak valid dibuang.")
-
-    print(f"✅ Total data bersih siap latih: {len(df_bersih)} sampel")
-
-    # Pisahkan matriks fitur (X), target label (y), dan ID penutur (groups)
-    X = df_bersih[kolom_fitur].values.astype(np.float32)
-    y = df_bersih["label"].values
-    groups = df_bersih["person_id"].values
-
-    return X, y, groups, df_bersih
-
-
-def lakukan_split_data(X: np.ndarray, y: np.ndarray, groups: np.ndarray):
-    """
-    Melakukan pembagian data latih (train) dan uji (test).
-    Prioritas 1: Split berdasarkan person_id (GroupShuffleSplit).
-    Prioritas 2: Jika semua 'unknown', gunakan Stratified Train-Test Split.
-    """
-    penutur_unik = set(groups)
-    ada_penutur_diketahui = any(p.lower() != "unknown" for p in penutur_unik)
-
-    # Skenario 1: Ada minimal 2 penutur yang diketahui
-    if ada_penutur_diketahui and len(penutur_unik) >= 2:
-        print("\n🛡️ METODE SPLIT: Speaker-Independent (GroupShuffleSplit)")
-        print(f"   Ditemukan {len(penutur_unik)} penutur unik: {sorted(penutur_unik)}")
-        gss = GroupShuffleSplit(
-            n_splits=1,
-            test_size=config.PROPORSI_UJI,
-            random_state=config.RANDOM_SEED
+    # Buang baris yang jumlah tangannya tidak sesuai mayoritas huruf tersebut
+    # (contoh: foto huruf 2-tangan seperti H yang tangan keduanya gagal terdeteksi MediaPipe).
+    if "jumlah_tangan" in tabel.columns:
+        sebelum_filter = len(tabel)
+        mayoritas_tangan = tabel.groupby("label")["jumlah_tangan"].transform(
+            lambda s: s.round().mode().iloc[0]
         )
-        train_idx, test_idx = next(gss.split(X, y, groups=groups))
-
-        penutur_train = set(groups[train_idx])
-        penutur_test = set(groups[test_idx])
-        print(f"   - Penutur di Data Latih : {sorted(penutur_train)}")
-        print(f"   - Penutur di Data Uji   : {sorted(penutur_test)}")
-        metode_split = "speaker_independent"
-
-    # Skenario 2: Semua penutur 'unknown' atau hanya 1 penutur
-    else:
-        print("\n⚠️ PERINGATAN KERAS TENTANG VALIDITAS EVALUASI:")
-        print("   Semua data bernilai person_id = 'unknown' (atau hanya ada 1 penutur).")
-        print("   Evaluasi per-penutur (speaker-independent) belum dapat dilakukan!")
-        print("   Menggunakan fallback: Stratified Random Split.")
-        print("   ⚠️ Catatan: Model mungkin terlihat sangat akurat di pengujian ini,")
-        print("   tetapi bisa turun akurasinya saat dicoba orang baru di dunia nyata.")
-        print("   💡 Disarankan merekam data penutur lain di 'src/collect_data.py'.\n")
-
-        # Cek apakah setiap kelas punya minimal 2 sampel untuk stratify
-        kelas_counts = pd.Series(y).value_counts()
-        kelas_langka = kelas_counts[kelas_counts < 2].index.tolist()
-
-        if len(kelas_langka) > 0:
-            print(f"   ℹ️ Huruf {kelas_langka} memiliki kurang dari 2 sampel. Split acak non-stratified digunakan.")
-            idx_semua = np.arange(len(X))
-            train_idx, test_idx = train_test_split(
-                idx_semua,
-                test_size=config.PROPORSI_UJI,
-                random_state=config.RANDOM_SEED,
-                shuffle=True
+        tabel = tabel[tabel["jumlah_tangan"].round() == mayoritas_tangan].reset_index(drop=True)
+        if len(tabel) < sebelum_filter:
+            print(
+                f"Dibuang {sebelum_filter - len(tabel)} baris yang jumlah tangannya "
+                "tidak konsisten (gagal deteksi tangan ke-2)."
             )
-        else:
-            idx_semua = np.arange(len(X))
-            train_idx, test_idx = train_test_split(
-                idx_semua,
-                test_size=config.PROPORSI_UJI,
-                random_state=config.RANDOM_SEED,
-                stratify=y,
-                shuffle=True
-            )
-        metode_split = "random_stratified"
 
-    X_train, X_test = X[train_idx], X[test_idx]
-    y_train, y_test = y[train_idx], y[test_idx]
-    groups_test = groups[test_idx]
-
-    print(f"📊 Pembagian Data: {len(X_train)} Latih ({(len(X_train)/len(X)*100):.1f}%) | "
-          f"{len(X_test)} Uji ({(len(X_test)/len(X)*100):.1f}%)")
-
-    return X_train, X_test, y_train, y_test, groups_test, metode_split
+    print(f"Total data bersih: {len(tabel)} baris, {tabel['label'].nunique()} huruf.")
+    return tabel
 
 
-def latih_dan_bandingkan_model(X_train, X_test, y_train, y_test):
+def buat_split(tabel):
+    """Kembalikan (indeks_latih, indeks_uji, mode, grup_uji).
+
+    mode 'grup'  : split per person_id (yang benar).
+    mode 'acak'  : cadangan jika person_id tidak informatif; hasil bisa TERLALU OPTIMIS.
     """
-    Melatih RandomForest dan MLPClassifier, lalu membandingkan performanya.
-    """
-    print("\n" + "=" * 65)
-    print("🤖 PROSES PELATIHAN MODEL MACHINE LEARNING")
-    print("=" * 65)
+    grup = tabel["person_id"].values
+    jumlah_grup = len(set(grup))
+    semua_unknown = jumlah_grup == 1 and grup[0] == "unknown"
 
-    hasil_model = {}
+    if jumlah_grup < 2:
+        print("\n" + "!" * 60)
+        print("PERINGATAN KERAS: hanya ada 1 person_id" +
+              (" ('unknown')" if semua_unknown else "") + ".")
+        print("Split per penutur TIDAK mungkin. Memakai split ACAK sebagai cadangan.")
+        print("Akurasi akan TERLALU OPTIMIS (foto orang yang sama ada di latih dan uji).")
+        print("Jangan laporkan angka ini sebagai kemampuan di dunia nyata.")
+        print("!" * 60 + "\n")
+        indeks = np.arange(len(tabel))
+        latih, uji = train_test_split(indeks, test_size=config.RASIO_UJI,
+                                      random_state=config.RANDOM_SEED,
+                                      stratify=tabel["label"].values)
+        return latih, uji, "acak", []
 
-    # --- 1. Random Forest Classifier ---
-    print("1️⃣ Melatih RandomForestClassifier...")
-    waktu_awal = time.time()
-    rf = RandomForestClassifier(
-        n_estimators=config.RF_N_ESTIMATORS,
-        random_state=config.RANDOM_SEED,
-        n_jobs=-1
+    pemisah = GroupShuffleSplit(n_splits=1, test_size=config.RASIO_UJI,
+                                random_state=config.RANDOM_SEED)
+    latih, uji = next(pemisah.split(tabel, groups=grup))
+    grup_uji = sorted(set(grup[uji]))
+    return latih, uji, "grup", grup_uji
+
+
+def terapkan_split_tersimpan(tabel, mode, grup_uji):
+    """Ulangi split yang sama saat evaluasi (dipakai evaluate.py)."""
+    if mode == "grup":
+        uji = np.where(tabel["person_id"].isin(grup_uji))[0]
+        latih = np.where(~tabel["person_id"].isin(grup_uji))[0]
+        return latih, uji
+    latih, uji, _, _ = buat_split(tabel)
+    return latih, uji
+
+
+def buat_model_rf():
+    return RandomForestClassifier(n_estimators=config.RF_JUMLAH_POHON,
+                                  random_state=config.RANDOM_SEED, n_jobs=-1)
+
+
+def buat_model_mlp():
+    # StandardScaler membantu MLP; Random Forest tidak membutuhkannya.
+    return make_pipeline(
+        StandardScaler(),
+        MLPClassifier(hidden_layer_sizes=config.MLP_LAPISAN, max_iter=config.MLP_MAKS_ITERASI,
+                      early_stopping=True, random_state=config.RANDOM_SEED),
     )
-    rf.fit(X_train, y_train)
-    durasi_rf = time.time() - waktu_awal
-
-    acc_train_rf = accuracy_score(y_train, rf.predict(X_train))
-    acc_test_rf = accuracy_score(y_test, rf.predict(X_test))
-    f1_test_rf = f1_score(y_test, rf.predict(X_test), average="macro")
-
-    hasil_model["RandomForest"] = {
-        "model": rf,
-        "acc_train": acc_train_rf,
-        "acc_test": acc_test_rf,
-        "f1_macro": f1_test_rf,
-        "durasi": durasi_rf
-    }
-    print(f"   ✓ Selesai ({durasi_rf:.2f} detik) | Akurasi Latih: {acc_train_rf*100:.1f}% | Akurasi Uji: {acc_test_rf*100:.1f}%")
-
-    # --- 2. Multi-Layer Perceptron (MLP) ---
-    print("\n2️⃣ Melatih MLPClassifier (Jaringan Saraf Tiruan)...")
-    waktu_awal = time.time()
-    mlp = MLPClassifier(
-        hidden_layer_sizes=config.MLP_HIDDEN_LAYER_SIZES,
-        max_iter=config.MLP_MAX_ITER,
-        random_state=config.RANDOM_SEED,
-        early_stopping=True,
-        n_iter_no_change=15
-    )
-    mlp.fit(X_train, y_train)
-    durasi_mlp = time.time() - waktu_awal
-
-    acc_train_mlp = accuracy_score(y_train, mlp.predict(X_train))
-    acc_test_mlp = accuracy_score(y_test, mlp.predict(X_test))
-    f1_test_mlp = f1_score(y_test, mlp.predict(X_test), average="macro")
-
-    hasil_model["MLP"] = {
-        "model": mlp,
-        "acc_train": acc_train_mlp,
-        "acc_test": acc_test_mlp,
-        "f1_macro": f1_test_mlp,
-        "durasi": durasi_mlp
-    }
-    print(f"   ✓ Selesai ({durasi_mlp:.2f} detik) | Akurasi Latih: {acc_train_mlp*100:.1f}% | Akurasi Uji: {acc_test_mlp*100:.1f}%")
-
-    # --- Tabel Perbandingan & Analisis Overfitting ---
-    print("\n" + "=" * 65)
-    print("📈 HASIL PERBANDINGAN MODEL")
-    print("=" * 65)
-    print(f"{'Nama Model':<16} | {'Akurasi Latih':<14} | {'Akurasi Uji':<12} | {'F1 Macro':<10} | {'Waktu':<8}")
-    print("-" * 65)
-    for nama, res in hasil_model.items():
-        print(f"{nama:<16} | {res['acc_train']*100:>12.2f}% | {res['acc_test']*100:>10.2f}% | {res['f1_macro']:>8.4f} | {res['durasi']:>5.2f}s")
-    print("-" * 65)
-
-    # Deteksi Overfitting Sederhana
-    for nama, res in hasil_model.items():
-        gap = res['acc_train'] - res['acc_test']
-        if gap > 0.15:
-            print(f"⚠️ Catatan {nama}: Selisih latih vs uji sebesar {gap*100:.1f}%. "
-                  f"Terindikasi overfitting (model menghafal data latih).")
-
-    # Tentukan model terbaik berdasarkan akurasi uji (atau F1-score jika seri)
-    if hasil_model["RandomForest"]["acc_test"] >= hasil_model["MLP"]["acc_test"]:
-        pemenang = "RandomForest"
-    else:
-        pemenang = "MLP"
-
-    print(f"\n🏆 Model Terbaik: {pemenang} (Akurasi Uji: {hasil_model[pemenang]['acc_test']*100:.2f}%)")
-
-    return hasil_model[pemenang]["model"], pemenang, hasil_model
-
-
-def simpan_model_dan_data_uji(model, nama_model: str, X_test, y_test, groups_test, label_unik, metode_split):
-    """
-    Menyimpan model terbaik, daftar kelas, dan split data uji untuk dievaluasi oleh evaluate.py.
-    """
-    os.makedirs(config.MODELS_DIR, exist_ok=True)
-
-    # 1. Simpan model terlatih
-    joblib.dump(model, config.MODEL_PATH)
-    print(f"\n💾 Model tersimpan ke : {config.MODEL_PATH}")
-
-    # 2. Simpan daftar label alfabet
-    joblib.dump(label_unik, config.MODEL_LABEL_PATH)
-    print(f"🏷️  Daftar label ke   : {config.MODEL_LABEL_PATH}")
-
-    # 3. Simpan data uji (test set) untuk dipakai modul evaluasi
-    test_set_path = os.path.join(config.MODELS_DIR, "data_uji_terakhir.joblib")
-    paket_uji = {
-        "X_test": X_test,
-        "y_test": y_test,
-        "groups_test": groups_test,
-        "nama_model": nama_model,
-        "metode_split": metode_split
-    }
-    joblib.dump(paket_uji, test_set_path)
-    print(f"📦 Data uji tersimpan : {test_set_path}")
 
 
 def main():
-    print("=" * 65)
-    print("  SignDesk — Pipeline Pelatihan Model Alfabet BISINDO")
-    print("=" * 65)
+    tabel = muat_data()
+    if tabel is None or tabel.empty:
+        return
 
-    # 1. Muat & gabungkan data
-    df_raw = muat_dan_gabungkan_data()
+    kolom_fitur = features.nama_kolom_fitur()
+    X = tabel[kolom_fitur].values.astype(np.float32)
+    y = tabel["label"].values
 
-    # 2. Bersihkan data
-    X, y, groups, df_bersih = bersihkan_data(df_raw)
+    latih, uji, mode, grup_uji = buat_split(tabel)
+    X_latih, y_latih = X[latih], y[latih]
+    X_uji, y_uji = X[uji], y[uji]
+    print(f"Split ({mode}): latih {len(latih)}, uji {len(uji)}")
+    if mode == "grup":
+        print(f"person_id di data UJI: {', '.join(grup_uji)}")
+        print(f"person_id di data LATIH: {', '.join(sorted(set(tabel['person_id'].values[latih])))}")
 
-    # 3. Lakukan split latih/uji
-    X_train, X_test, y_train, y_test, groups_test, metode_split = lakukan_split_data(X, y, groups)
+    # Augmentasi cermin horizontal pada data latih:
+    # Mengatasi perbedaan kamera mirror vs foto dataset sekaligus tangan kidal/kanan.
+    X_latih = np.vstack([X_latih, features.cerminkan_fitur(X_latih)])
+    y_latih = np.concatenate([y_latih, y_latih])
+    print(f"Data latih setelah augmentasi cermin kiri-kanan: {len(X_latih)} sampel")
 
-    # 4. Latih dan bandingkan model
-    model_terbaik, nama_pemenang, _ = latih_dan_bandingkan_model(X_train, X_test, y_train, y_test)
+    tidak_ada_di_latih = sorted(set(y_uji) - set(y_latih))
+    if tidak_ada_di_latih:
+        print(f"PERINGATAN: huruf ada di uji tapi TIDAK di latih: {', '.join(tidak_ada_di_latih)} "
+              "(pasti salah diprediksi).")
+    tidak_ada_di_uji = sorted(set(config.HURUF) - set(y_uji))
+    if tidak_ada_di_uji:
+        print(f"Catatan: huruf tanpa data uji (tidak terukur): {', '.join(tidak_ada_di_uji)}")
 
-    # 5. Simpan model dan data uji
-    label_unik = sorted(list(set(y)))
-    simpan_model_dan_data_uji(
-        model=model_terbaik,
-        nama_model=nama_pemenang,
-        X_test=X_test,
-        y_test=y_test,
-        groups_test=groups_test,
-        label_unik=label_unik,
-        metode_split=metode_split
-    )
+    kandidat = {"RandomForest": buat_model_rf(), "MLP": buat_model_mlp()}
+    hasil = {}
+    for nama, model in kandidat.items():
+        print(f"\nMelatih {nama} ...")
+        model.fit(X_latih, y_latih)
+        akurasi_latih = model.score(X_latih, y_latih)
+        akurasi_uji = model.score(X_uji, y_uji)
+        hasil[nama] = (akurasi_uji, akurasi_latih)
+        print(f"  akurasi latih: {akurasi_latih:.3f} | akurasi uji: {akurasi_uji:.3f}")
+        if akurasi_latih - akurasi_uji > 0.15:
+            print("  ! Selisih besar: tanda overfitting / data uji berbeda dari data latih.")
 
-    print("\n🎉 Pelatihan selesai! Lanjutkan ke tahap evaluasi mendalam:")
-    print("   👉 Jalankan: python src/evaluate.py\n")
+    nama_terbaik = max(hasil, key=lambda n: hasil[n][0])
+    print(f"\nModel terbaik: {nama_terbaik} (akurasi uji {hasil[nama_terbaik][0]:.3f})")
+
+    config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump({
+        "model": kandidat[nama_terbaik],
+        "nama_model": nama_terbaik,
+        "labels": list(kandidat[nama_terbaik].classes_),
+        "mode_split": mode,
+        "grup_uji": grup_uji,
+        "kolom_fitur": kolom_fitur,
+    }, config.MODEL_PATH)
+    print(f"Model disimpan: {config.MODEL_PATH}")
+    print("Lanjut: python src/evaluate.py")
 
 
 if __name__ == "__main__":
     main()
-

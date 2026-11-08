@@ -1,146 +1,66 @@
-# ============================================================
-# SignDesk - config.py
-# SATU tempat untuk SEMUA pengaturan proyek.
-# Ubah nilai di sini, efeknya langsung terasa di seluruh kode.
-#
-# Aturan tim: file ini hanya diubah lewat kesepakatan bersama.
-# Jangan hardcode nilai-nilai ini di file lain!
-# ============================================================
+"""Semua pengaturan SignDesk ada di sini.
 
-import os
+Kenapa satu file? Supaya training, demo real-time, dan aplikasi memakai angka
+yang sama. Ubah angka di sini, jangan di-hardcode di file lain.
+Catatan tim: file ini hanya diubah lewat kesepakatan bersama.
+"""
 
-# ------------------------------------------------------------------
-# HURUF YANG DIDUKUNG
-# ------------------------------------------------------------------
-# Daftar 26 huruf alfabet BISINDO A-Z.
-# J dan Z ditandai eksperimental karena melibatkan gerakan tangan.
-HURUF_DIDUKUNG = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+from pathlib import Path
 
-HURUF_EKSPERIMENTAL = ["J", "Z"]  # Belum akurat karena perlu data gerakan
+# ---------- Path folder ----------
+# Path dihitung dari lokasi file ini, jadi aman dijalankan dari folder mana pun.
+BASE_DIR = Path(__file__).resolve().parent
+RAW_IMAGES_DIR = BASE_DIR / "data" / "raw_images"
+LANDMARKS_DIR = BASE_DIR / "data" / "landmarks"
+MODELS_DIR = BASE_DIR / "models"
+ASSETS_ALFABET_DIR = BASE_DIR / "assets" / "alfabet"
+REPORTS_DIR = BASE_DIR / "reports"
 
-# ------------------------------------------------------------------
-# PATH FOLDER
-# (semua relatif terhadap root proyek: folder signdesk/)
-# ------------------------------------------------------------------
+MODEL_PATH = MODELS_DIR / "model_terbaik.joblib"
 
-# Root proyek: folder tempat config.py ini berada
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+# ---------- Label ----------
+HURUF = [chr(kode) for kode in range(ord("A"), ord("Z") + 1)]  # A-Z
+HURUF_EKSPERIMENTAL = ["J", "Z"]  # kemungkinan bergerak; di MVP dianggap pose statis
 
-# Folder data
-DATA_DIR        = os.path.join(ROOT_DIR, "data")
-RAW_IMAGES_DIR  = os.path.join(DATA_DIR, "raw_images")  # gambar dataset
-LANDMARKS_DIR   = os.path.join(DATA_DIR, "landmarks")   # CSV hasil ekstraksi
-
-# Folder model terlatih
-MODELS_DIR = os.path.join(ROOT_DIR, "models")
-
-# Folder gambar isyarat untuk Teks → Isyarat
-ASSETS_ALFABET_DIR = os.path.join(ROOT_DIR, "assets", "alfabet")
-
-# Folder laporan evaluasi
-REPORTS_DIR = os.path.join(ROOT_DIR, "reports")
-
-# Nama file CSV gabungan landmark
-LANDMARKS_CSV = os.path.join(LANDMARKS_DIR, "landmarks_gabungan.csv")
-
-# Nama file CSV hasil pengumpulan data webcam (src/collect_data.py)
-LANDMARKS_WEBCAM_CSV = os.path.join(LANDMARKS_DIR, "landmarks_kamera.csv")
-
-# Interval minimum antar rekaman sampel otomatis saat tombol ditahan (detik)
-INTERVAL_REKAM_DETIK = 0.15
-
-# Nama file model terlatih (classifier tangan)
-MODEL_PATH       = os.path.join(MODELS_DIR, "model_terbaik.joblib")
-MODEL_LABEL_PATH = os.path.join(MODELS_DIR, "daftar_label.joblib")
-
-# Model MediaPipe HandLandmarker (file .task, diunduh dari Google)
-# Unduh dari: https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
-HAND_LANDMARKER_MODEL = os.path.join(MODELS_DIR, "hand_landmarker.task")
-
-# ------------------------------------------------------------------
-# PENGATURAN KAMERA / MEDIAPIPE
-# ------------------------------------------------------------------
-
-# Indeks kamera yang dipakai (0 = kamera utama/pertama)
-# Ganti ke 1 atau 2 jika kamera yang benar bukan indeks 0
-INDEKS_KAMERA = 0
-
-# Resolusi kamera (lebar x tinggi) dalam piksel
-LEBAR_KAMERA  = 640
+# ---------- Kamera ----------
+INDEKS_KAMERA = 0        # coba 1 atau 2 jika kamera tidak terbuka
+LEBAR_KAMERA = 640
 TINGGI_KAMERA = 480
+CERMINKAN_KAMERA = True  # tampilan mirror agar natural bagi pengguna
 
-# Jumlah tangan maksimum yang dideteksi MediaPipe
-MAX_TANGAN = 2
+# ---------- MediaPipe ----------
+MAKS_TANGAN = 2
+MIN_KEYAKINAN_DETEKSI = 0.5
+MIN_KEYAKINAN_TRACKING = 0.5
 
-# Tingkat kepercayaan deteksi dan tracking MediaPipe (0.0 - 1.0)
-KEYAKINAN_DETEKSI  = 0.7
-KEYAKINAN_TRACKING = 0.5
+# ---------- Penstabil prediksi ----------
+JUMLAH_FRAME_VOTING = 10      # N prediksi terakhir untuk voting
+AMBANG_KEYAKINAN = 0.7        # di bawah ini prediksi diabaikan
+DETIK_STABIL = 1.0            # huruf harus stabil selama ini sebelum masuk teks
+DETIK_JEDA_HURUF_SAMA = 1.0   # jeda/perubahan sebelum huruf sama boleh masuk lagi
 
-# ------------------------------------------------------------------
-# PENGATURAN EKSTRAKSI FITUR
-# ------------------------------------------------------------------
+# ---------- Ekstraksi dari dataset gambar ----------
+EKSTENSI_GAMBAR = (".jpg", ".jpeg", ".png", ".bmp")
+FILE_CSV_GAMBAR = LANDMARKS_DIR / "landmarks_dari_gambar.csv"
+# Regex untuk mengambil person_id dari NAMA FILE (grup pertama = id).
+# Contoh: r"^(P\d+)_" untuk file "P01_A_003.jpg". None = tidak dipakai (person_id = "unknown").
+POLA_PERSON_ID = None
 
-# Jumlah titik landmark per tangan (standar MediaPipe = 21)
-TITIK_PER_TANGAN = 21
+# ---------- Pengumpulan data webcam ----------
+FILE_CSV_WEBCAM = LANDMARKS_DIR / "landmarks_webcam.csv"
+JEDA_REKAM_DETIK = 0.15            # jarak minimal antar sampel saat SPASI ditahan
+MAKS_SAMPEL_PER_HURUF_SESI = 150   # batas wajar per huruf per sesi (agar data bervariasi)
 
-# Komponen koordinat per titik (x, y, z)
-KOMPONEN_PER_TITIK = 3
+# Apakah fitur dihitung dari frame yang sudah DICERMINKAN (seperti yang dilihat pengguna)?
+# WAJIB sama di pengumpulan data dan real-time. Dataset gambar tidak dicerminkan,
+# jadi default False (deteksi pada frame asli, mirror hanya untuk tampilan).
+# Jika akurasi real-time buruk padahal evaluasi bagus, coba ubah ke True lalu uji ulang.
+FITUR_DARI_FRAME_CERMIN = False
 
-# Ukuran fitur untuk SATU tangan (21 titik × 3 koordinat = 63)
-FITUR_PER_TANGAN = TITIK_PER_TANGAN * KOMPONEN_PER_TITIK  # = 63
-
-# Ukuran fitur untuk DUA tangan (63 × 2 = 126)
-FITUR_DUA_TANGAN = FITUR_PER_TANGAN * MAX_TANGAN  # = 126
-
-# +1 untuk fitur penanda jumlah tangan (1.0 = satu tangan, 2.0 = dua tangan)
-UKURAN_VEKTOR_FITUR = FITUR_DUA_TANGAN + 1  # = 127
-
-# ------------------------------------------------------------------
-# PENGATURAN PENSTABIL PREDIKSI (src/stabilizer.py)
-# ------------------------------------------------------------------
-
-# Jumlah frame terakhir yang disimpan untuk voting mayoritas
-N_FRAME_VOTING = 10
-
-# Keyakinan minimum agar prediksi dianggap valid (0.0 - 1.0)
-AMBANG_KEYAKINAN = 0.70
-
-# Waktu (detik) prediksi harus stabil sebelum huruf dikonfirmasi
-WAKTU_STABIL_DETIK = 1.0
-
-# Jeda minimum (detik) setelah huruf dikonfirmasi sebelum bisa konfirmasi lagi
-# (mencegah huruf yang sama terus-menerus masuk)
-JEDA_SETELAH_KONFIRMASI_DETIK = 0.5
-
-# ------------------------------------------------------------------
-# PENGATURAN PELATIHAN MODEL (src/train.py)
-# ------------------------------------------------------------------
-
-# Proporsi data yang dipakai untuk pengujian (0.0 - 1.0)
-PROPORSI_UJI = 0.2
-
-# Random seed agar hasil pelatihan bisa direproduksi
+# ---------- Pelatihan ----------
+RASIO_UJI = 0.2
 RANDOM_SEED = 42
-
-# Jumlah pohon untuk RandomForest
-RF_N_ESTIMATORS = 200
-
-# Ukuran layer tersembunyi untuk MLP
-MLP_HIDDEN_LAYER_SIZES = (256, 128)
-
-# Jumlah iterasi maksimum MLP
-MLP_MAX_ITER = 500
-
-# ------------------------------------------------------------------
-# PENGATURAN APLIKASI STREAMLIT (app/app.py)
-# ------------------------------------------------------------------
-
-# Interval refresh antarmuka Streamlit (detik)
-INTERVAL_REFRESH = 0.1
-
-# Teks disclaimer yang wajib ditampilkan di UI
-TEKS_DISCLAIMER = (
-    "⚠️ Alat bantu komunikasi dasar — bukan pengganti juru bahasa isyarat. "
-    "Video diproses di perangkat dan tidak disimpan."
-)
-
+RF_JUMLAH_POHON = 300
+MLP_LAPISAN = (128, 64)
+MLP_MAKS_ITERASI = 500
+FILE_GAMBAR_CONFUSION = REPORTS_DIR / "confusion_matrix.png"
