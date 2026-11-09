@@ -1,10 +1,4 @@
-# Daftar pustaka SignDesk.
-# Versi SENGAJA belum di-pin karena saya tidak bisa memverifikasi kompatibilitasnya.
-# Setelah `pip install -r requirements.txt` berhasil dan src/cek_kamera.py jalan,
-# jalankan:   pip freeze > requirements.lock.txt
-# lalu ganti isi file ini dengan versi dari hasil freeze (format nama==versi)
-# supaya semua anggota tim memakai versi yang sama.
-mediapipe
+﻿mediapipe
 opencv-python
 numpy
 pandas
@@ -13,3 +7,4 @@ joblib
 matplotlib
 streamlit
 streamlit-webrtc
+av

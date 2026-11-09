@@ -1,11 +1,13 @@
 ﻿"""Script peluncur otomatis SignDesk (1-click runner).
 
 Fungsi:
-1. Memeriksa keberadaan model terlatih (models/model_terbaik.joblib).
+1. Memeriksa modul Python yang dibutuhkan (joblib, streamlit, cv2, mediapipe, sklearn, pandas, numpy, dll).
+   Jika ada modul yang belum terpasang di komputer ini, otomatis menjalankan pip install.
+2. Memeriksa keberadaan model terlatih (models/model_terbaik.joblib).
    Jika belum ada, otomatis melatih model dari data/landmarks/ (src/train.py).
-2. Mengatur konfigurasi encoding UTF-8 agar kompatibel dengan terminal Windows.
-3. Menjalankan server web Streamlit (app/app.py) pada port 8501.
-4. Memantau ketersediaan server dan otomatis membuka browser ke http://localhost:8501
+3. Mengatur konfigurasi encoding UTF-8 agar kompatibel dengan terminal Windows.
+4. Menjalankan server web Streamlit (app/app.py) pada port 8501.
+5. Memantau ketersediaan server dan otomatis membuka browser ke http://localhost:8501
    begitu aplikasi siap digunakan.
 """
 
@@ -17,6 +19,7 @@ import threading
 import webbrowser
 import subprocess
 import urllib.request
+import importlib.util
 from pathlib import Path
 
 # Pastikan encoding UTF-8 di Windows terminal
@@ -27,7 +30,53 @@ BASE_DIR = Path(__file__).resolve().parent
 APP_PATH = BASE_DIR / "app" / "app.py"
 MODEL_PATH = BASE_DIR / "models" / "model_terbaik.joblib"
 TRAIN_SCRIPT = BASE_DIR / "src" / "train.py"
+REQ_FILE = BASE_DIR / "requirements.txt"
 DEFAULT_PORT = 8501
+
+# Daftar paket wajib untuk aplikasi SignDesk
+MODUL_WAJIB = [
+    ("joblib", "joblib"),
+    ("streamlit", "streamlit"),
+    ("cv2", "opencv-python"),
+    ("mediapipe", "mediapipe"),
+    ("sklearn", "scikit-learn"),
+    ("pandas", "pandas"),
+    ("numpy", "numpy"),
+    ("streamlit_webrtc", "streamlit-webrtc"),
+    ("matplotlib", "matplotlib"),
+    ("av", "av"),
+]
+
+
+def cek_dan_install_dependensi():
+    """Periksa apakah semua pustaka terpasang. Jika ada yang hilang (seperti joblib), pasang otomatis."""
+    modul_kurang = []
+    pip_kurang = []
+    for nama_modul, nama_pip in MODUL_WAJIB:
+        if importlib.util.find_spec(nama_modul) is None:
+            modul_kurang.append(nama_modul)
+            pip_kurang.append(nama_pip)
+
+    if modul_kurang:
+        print("=" * 60, flush=True)
+        print(f"[INFO] Ditemukan modul yang belum terpasang: {', '.join(modul_kurang)}", flush=True)
+        print("[INFO] Sedang memasang paket yang dibutuhkan otomatis via pip...", flush=True)
+        print("=" * 60, flush=True)
+
+        if REQ_FILE.exists():
+            perintah = [sys.executable, "-m", "pip", "install", "-r", str(REQ_FILE)]
+        else:
+            perintah = [sys.executable, "-m", "pip", "install"] + pip_kurang
+
+        proses = subprocess.run(perintah, cwd=str(BASE_DIR))
+        if proses.returncode != 0:
+            print("\n[PERINGATAN] Pemasangan otomatis mengalami kendala.", flush=True)
+            print("Silakan jalankan perintah berikut secara manual di Command Prompt:", flush=True)
+            print(f"    pip install {' '.join(pip_kurang)}\n", flush=True)
+        else:
+            print("[OK] Seluruh pustaka berhasil dipasang!\n", flush=True)
+    else:
+        print("[OK] Semua dependensi Python terpasang lengkap.", flush=True)
 
 
 def cek_port_tersedia(port):
@@ -63,7 +112,7 @@ def cek_dan_siapkan_model():
 def buka_browser_otomatis(url):
     """Tunggu hingga localhost aktif, lalu buka di browser default."""
     print(f"[INFO] Menunggu server aktif di {url} ...", flush=True)
-    batas_waktu = 35  # detik
+    batas_waktu = 40  # detik
     mulai = time.time()
     buka_sukses = False
 
@@ -93,15 +142,21 @@ def main():
     print("      SIGNDESK — PENERJEMAH ALFABET BISINDO (MODE LOKET)", flush=True)
     print("=" * 60, flush=True)
 
+    # 1. Pastikan seluruh dependensi seperti joblib, streamlit, cv2, dll ada
+    cek_dan_install_dependensi()
+
+    # 2. Pastikan file model tersedia
     cek_dan_siapkan_model()
 
+    # 3. Tentukan port dan URL
     port = tentukan_port()
     url = f"http://localhost:{port}"
 
-    # Jalankan thread pemantau untuk membuka browser otomatis
+    # 4. Jalankan thread pemantau untuk membuka browser otomatis
     thread_browser = threading.Thread(target=buka_browser_otomatis, args=(url,), daemon=True)
     thread_browser.start()
 
+    # 5. Jalankan Streamlit
     perintah = [
         sys.executable,
         "-m",
