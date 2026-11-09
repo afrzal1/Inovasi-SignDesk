@@ -154,6 +154,9 @@ signdesk/
 ```
 
 ## 6. Cara Menjalankan (rencana)
+buka "JALANKAN_APLIKASI.BAT"
+
+ATAU 
 
 ```bash
 # 1. Buat lingkungan virtual
